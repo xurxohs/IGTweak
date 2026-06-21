@@ -226,6 +226,49 @@ static void installTypingIndicatorHooks(void) {
 #pragma mark - 5. Disable Screenshot Notifications
 // ============================================================================
 
+void (*orig_ScreenshotPrompt_viewDidAppear)(id, SEL, BOOL);
+void new_ScreenshotPrompt_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    // No-op to disable screenshot notification prompt
+}
+
+// ============================================================================
+// #pragma mark - 6. Analytics and Ad Tracking Telemetry
+// ============================================================================
+
+// FBAdTrackingDataReporter: -initWithPreferencesDataStore:logger:helper:config:
+id (*orig_FBAdTrackingDataReporter_init)(id, SEL, id, id, id, id);
+static id new_FBAdTrackingDataReporter_init(id self, SEL _cmd, id store, id logger, id helper, id config) {
+    NSLog(@"[IGTweak] 🚫 Blocked FBAdTrackingDataReporter init");
+    // Return nil to prevent initialization of ad tracking reporter
+    return nil;
+}
+
+// FBAnalyticsBladeRunnerRequestStreamProvider: -writeEventToStream:
+static IMP orig_FBAnalyticsBladeRunner_writeEventToStream = NULL;
+static void new_FBAnalyticsBladeRunner_writeEventToStream(id self, SEL _cmd, id event) {
+    // No-op to block all analytics events sent to FB/IG servers via BladeRunner stream
+}
+
+static void installTrackingHooks(void) {
+    Class adTrackingClass = NSClassFromString(@"FBAdTrackingDataReporter");
+    Class fbAnalyticsStreamClass = NSClassFromString(@"FBAnalyticsBladeRunnerRequestStreamProvider");
+
+    if (adTrackingClass) {
+        swizzleMethod(adTrackingClass,
+                      @selector(initWithPreferencesDataStore:logger:helper:config:),
+                      (IMP)new_FBAdTrackingDataReporter_init,
+                      (IMP *)&orig_FBAdTrackingDataReporter_init);
+    }
+    
+    if (fbAnalyticsStreamClass) {
+        swizzleMethod(fbAnalyticsStreamClass,
+                      @selector(writeEventToStream:),
+                      (IMP)new_FBAnalyticsBladeRunner_writeEventToStream,
+                      &orig_FBAnalyticsBladeRunner_writeEventToStream);
+        NSLog(@"[IGTweak] ✅ Hooked FBAnalyticsBladeRunnerRequestStreamProvider");
+    }
+}
+
 // We intercept UIApplicationUserDidTakeScreenshotNotification handling.
 // Also hook the screenshot reshare prompt controller to prevent any server reporting.
 
@@ -307,6 +350,10 @@ static void IGTweakInit(void) {
         NSLog(@"[IGTweak] Installing screenshot notification hooks...");
         installScreenshotHooks();
 
+        // 6. Analytics and Ad Tracking
+        NSLog(@"[IGTweak] Installing tracking and analytics hooks...");
+        installTrackingHooks();
+
         NSLog(@"[IGTweak] ═══════════════════════════════════════");
         NSLog(@"[IGTweak] ✅ All hooks installed successfully!");
         NSLog(@"[IGTweak]    🚫 Feed ads: BLOCKED");
@@ -314,5 +361,6 @@ static void IGTweakInit(void) {
         NSLog(@"[IGTweak]    👻 Ghost Mode: ACTIVE");
         NSLog(@"[IGTweak]    🔇 Typing indicator: DISABLED");
         NSLog(@"[IGTweak]    📸 Screenshot alerts: DISABLED");
+        NSLog(@"[IGTweak]    👁 Analytics & Tracking: DISABLED");
     }
 }
