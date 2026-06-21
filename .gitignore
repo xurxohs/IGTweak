@@ -1,0 +1,19 @@
+# Instagram app binary & decrypted data
+Payload/
+iTunesArtwork
+iTunesMetadata.plist
+SC_Info/
+
+# Dumped headers (too large, copyrighted)
+Headers/
+
+# Compiled artifacts
+Tweak/*.dylib
+Tweak/*.o
+
+# Packaged IPA
+*.ipa
+
+# macOS
+.DS_Store
+__MACOSX/
