@@ -11,6 +11,7 @@
 #define kIGTweakBlockTyping @"IGTweak_BlockTyping"
 #define kIGTweakBlockAnalytics @"IGTweak_BlockAnalytics"
 #define kIGTweakEnableDownload @"IGTweak_DownloadMedia"
+#define kIGTweakBatterySaver @"IGTweak_BatterySaver"
 
 static BOOL tweakEnabled(NSString *key) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -45,7 +46,7 @@ static BOOL tweakEnabled(NSString *key) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return 5;
+    return 6;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -87,6 +88,11 @@ static BOOL tweakEnabled(NSString *key) {
             cell.detailTextLabel.text = @"Добавить кнопку загрузки фото/видео";
             toggle.on = tweakEnabled(kIGTweakEnableDownload);
             break;
+        case 5:
+            cell.textLabel.text = @"Глубокое энергосбережение";
+            cell.detailTextLabel.text = @"Полностью отключить фоновую активность";
+            toggle.on = tweakEnabled(kIGTweakBatterySaver);
+            break;
     }
     
     return cell;
@@ -100,6 +106,7 @@ static BOOL tweakEnabled(NSString *key) {
         case 2: [defaults setBool:sender.isOn forKey:kIGTweakBlockTyping]; break;
         case 3: [defaults setBool:sender.isOn forKey:kIGTweakBlockAnalytics]; break;
         case 4: [defaults setBool:sender.isOn forKey:kIGTweakEnableDownload]; break;
+        case 5: [defaults setBool:sender.isOn forKey:kIGTweakBatterySaver]; break;
     }
     [defaults synchronize];
 }
@@ -570,6 +577,56 @@ static void installDownloadHooks(void) {
     if (storyOverlay) swizzleMethod(storyOverlay, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
 }
 
+// ============================================================================
+#pragma mark - Deep Freeze / Battery Saver Feature
+// ============================================================================
+
+static IMP orig_setMinimumBackgroundFetchInterval = NULL;
+static void hook_setMinimumBackgroundFetchInterval(UIApplication *self, SEL _cmd, NSTimeInterval minimumBackgroundFetchInterval) {
+    if (tweakEnabled(kIGTweakBatterySaver)) {
+        minimumBackgroundFetchInterval = UIApplicationBackgroundFetchIntervalNever;
+    }
+    if (orig_setMinimumBackgroundFetchInterval) {
+        ((void(*)(id, SEL, NSTimeInterval))orig_setMinimumBackgroundFetchInterval)(self, _cmd, minimumBackgroundFetchInterval);
+    }
+}
+
+static IMP orig_applicationDidEnterBackground = NULL;
+static void hook_applicationDidEnterBackground(id self, SEL _cmd, id arg1) {
+    if (tweakEnabled(kIGTweakBatterySaver)) {
+        NSLog(@"[IGTweak] ❄️ Deep Freeze: Blocked IGBackgroundFetchManager applicationDidEnterBackground");
+        return;
+    }
+    if (orig_applicationDidEnterBackground) {
+        ((void(*)(id, SEL, id))orig_applicationDidEnterBackground)(self, _cmd, arg1);
+    }
+}
+
+static IMP orig_didStartBackgroundFetchAppJobsRun = NULL;
+static void hook_didStartBackgroundFetchAppJobsRun(id self, SEL _cmd, id arg1) {
+    if (tweakEnabled(kIGTweakBatterySaver)) {
+        NSLog(@"[IGTweak] ❄️ Deep Freeze: Blocked IGBackgroundAppJobsRunner didStartBackgroundFetchAppJobsRun");
+        return;
+    }
+    if (orig_didStartBackgroundFetchAppJobsRun) {
+        ((void(*)(id, SEL, id))orig_didStartBackgroundFetchAppJobsRun)(self, _cmd, arg1);
+    }
+}
+
+static void installBatterySaverHooks(void) {
+    swizzleMethod([UIApplication class], @selector(setMinimumBackgroundFetchInterval:), (IMP)hook_setMinimumBackgroundFetchInterval, &orig_setMinimumBackgroundFetchInterval);
+    
+    Class fetchManager = NSClassFromString(@"IGBackgroundFetchManager");
+    if (fetchManager) {
+        swizzleMethod(fetchManager, @selector(applicationDidEnterBackground:), (IMP)hook_applicationDidEnterBackground, &orig_applicationDidEnterBackground);
+    }
+    
+    Class jobsRunner = NSClassFromString(@"IGBackgroundAppJobsRunner");
+    if (jobsRunner) {
+        swizzleMethod(jobsRunner, @selector(didStartBackgroundFetchAppJobsRun:), (IMP)hook_didStartBackgroundFetchAppJobsRun, &orig_didStartBackgroundFetchAppJobsRun);
+    }
+}
+
 static void installWindowHooks(void) {
     swizzleMethod([UIWindow class], @selector(makeKeyAndVisible), (IMP)hook_makeKeyAndVisible, &orig_makeKeyAndVisible);
 }
@@ -590,6 +647,7 @@ static void IGTweakInit(void) {
         installTrackingHooks();
         installAnalyticsHooks();
         installDownloadHooks();
+        installBatterySaverHooks();
         installWindowHooks();
         NSLog(@"[IGTweak] ✅ All hooks and UI installed successfully!");
     }
