@@ -11,6 +11,7 @@ CFLAGS := \
 	-miphoneos-version-min=$(MIN_IOS) \
 	-dynamiclib \
 	-framework Foundation \
+	-framework UIKit \
 	-lobjc \
 	-O2 \
 	-Wall
