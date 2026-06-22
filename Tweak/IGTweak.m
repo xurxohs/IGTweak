@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <Security/Security.h>
 #import "IGTweakDownloadManager.h"
+#import "fishhook.h"
 
 // ============================================================================
 #pragma mark - Preferences / NSUserDefaults Keys
@@ -711,6 +713,60 @@ static void installWindowHooks(void) {
 }
 
 // ============================================================================
+#pragma mark - Keychain Fix (Sideloading)
+// ============================================================================
+
+static OSStatus (*orig_SecItemAdd)(CFDictionaryRef attributes, CFTypeRef *result);
+static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    if (attributes) {
+        NSMutableDictionary *mutableAttributes = [(__bridge NSDictionary *)attributes mutableCopy];
+        [mutableAttributes removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+        return orig_SecItemAdd((__bridge CFDictionaryRef)mutableAttributes, result);
+    }
+    return orig_SecItemAdd(attributes, result);
+}
+
+static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
+static OSStatus hook_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    if (query) {
+        NSMutableDictionary *mutableQuery = [(__bridge NSDictionary *)query mutableCopy];
+        [mutableQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+        return orig_SecItemUpdate((__bridge CFDictionaryRef)mutableQuery, attributesToUpdate);
+    }
+    return orig_SecItemUpdate(query, attributesToUpdate);
+}
+
+static OSStatus (*orig_SecItemDelete)(CFDictionaryRef query);
+static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
+    if (query) {
+        NSMutableDictionary *mutableQuery = [(__bridge NSDictionary *)query mutableCopy];
+        [mutableQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+        return orig_SecItemDelete((__bridge CFDictionaryRef)mutableQuery);
+    }
+    return orig_SecItemDelete(query);
+}
+
+static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
+static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    if (query) {
+        NSMutableDictionary *mutableQuery = [(__bridge NSDictionary *)query mutableCopy];
+        [mutableQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+        return orig_SecItemCopyMatching((__bridge CFDictionaryRef)mutableQuery, result);
+    }
+    return orig_SecItemCopyMatching(query, result);
+}
+
+static void installKeychainHooks(void) {
+    rebind_symbols((struct rebinding[4]){
+        {"SecItemAdd", hook_SecItemAdd, (void *)&orig_SecItemAdd},
+        {"SecItemUpdate", hook_SecItemUpdate, (void *)&orig_SecItemUpdate},
+        {"SecItemDelete", hook_SecItemDelete, (void *)&orig_SecItemDelete},
+        {"SecItemCopyMatching", hook_SecItemCopyMatching, (void *)&orig_SecItemCopyMatching}
+    }, 4);
+    NSLog(@"[IGTweak] 🔑 Keychain Fix Installed!");
+}
+
+// ============================================================================
 #pragma mark - Constructor — Entry Point
 // ============================================================================
 
@@ -718,6 +774,7 @@ __attribute__((constructor))
 static void IGTweakInit(void) {
     NSLog(@"[IGTweak] 🚀 IGTweak loading with UI...");
     @autoreleasepool {
+        installKeychainHooks();
         installFeedAdHooks();
         installStoryAdHooks();
         installGhostModeHooks();

@@ -12,12 +12,12 @@ CFLAGS := \
 	-dynamiclib \
 	-framework Foundation \
 	-framework UIKit \
+	-framework Security \
 	-lobjc \
 	-O2 \
 	-Wall
 
-SRC := IGTweak.m
-SRC := IGTweak.m IGTweakDownloadManager.m
+SRC := IGTweak.m IGTweakDownloadManager.m fishhook.c
 OUT := IGTweak.dylib
 
 .PHONY: all clean install
