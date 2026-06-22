@@ -481,8 +481,7 @@ static void installAnalyticsHooks(void) {
 
 @interface IGTweakDownloadHelper : NSObject
 + (instancetype)sharedInstance;
-- (void)downloadPhotoAction:(UIButton *)sender;
-- (void)downloadVideoAction:(UIButton *)sender;
+- (void)downloadAction:(UIButton *)sender;
 @end
 
 @implementation IGTweakDownloadHelper
@@ -493,12 +492,82 @@ static void installAnalyticsHooks(void) {
     return instance;
 }
 
-- (void)downloadPhotoAction:(UIButton *)sender {
-    UIView *cell = sender.superview;
-    // Recursively find UIImageView
+- (void)downloadAction:(UIButton *)sender {
+    UIView *currentView = sender;
+    UICollectionView *feedCV = nil;
+    
+    while (currentView && ![currentView isKindOfClass:[UICollectionView class]]) {
+        currentView = currentView.superview;
+    }
+    feedCV = (UICollectionView *)currentView;
+    
+    UIView *targetContainer = sender.superview;
+    
+    if (feedCV && [sender.superview isKindOfClass:NSClassFromString(@"IGUFIButtonBarView")]) {
+        CGPoint center = [sender.superview convertPoint:sender.superview.bounds.origin toView:feedCV];
+        NSArray *visibleCells = [feedCV visibleCells];
+        UICollectionViewCell *targetCell = nil;
+        CGFloat minDistance = CGFLOAT_MAX;
+        
+        for (UICollectionViewCell *c in visibleCells) {
+            NSString *cName = NSStringFromClass([c class]);
+            if ([cName containsString:@"Photo"] || [cName containsString:@"Video"] || [cName containsString:@"Carousel"] || [cName containsString:@"Page"]) {
+                CGFloat distance = center.y - c.frame.origin.y;
+                if (distance > 0 && distance < minDistance) {
+                    minDistance = distance;
+                    targetCell = c;
+                }
+            }
+        }
+        
+        if (targetCell) {
+            targetContainer = targetCell;
+            
+            if ([NSStringFromClass([targetCell class]) containsString:@"Carousel"] || [NSStringFromClass([targetCell class]) containsString:@"Page"]) {
+                UICollectionView *carouselCV = nil;
+                UIView *(^__block findCV)(UIView *) = ^UIView *(UIView *v) {
+                    if ([v isKindOfClass:[UICollectionView class]]) return v;
+                    for (UIView *s in v.subviews) { UIView *f = findCV(s); if (f) return f; }
+                    return nil;
+                };
+                carouselCV = (UICollectionView *)findCV(targetCell);
+                
+                if (carouselCV) {
+                    NSArray *carouselCells = [carouselCV visibleCells];
+                    UICollectionViewCell *centerCell = nil;
+                    CGFloat minXDist = CGFLOAT_MAX;
+                    CGFloat centerX = carouselCV.contentOffset.x + (carouselCV.bounds.size.width / 2.0);
+                    for (UICollectionViewCell *cc in carouselCells) {
+                        CGFloat dist = fabs(cc.center.x - centerX);
+                        if (dist < minXDist) { minXDist = dist; centerCell = cc; }
+                    }
+                    if (centerCell) targetContainer = centerCell;
+                }
+            }
+        }
+    }
+    
+    NSURL *videoURL = nil;
+    if ([targetContainer respondsToSelector:@selector(videoURLProvider)]) {
+        id provider = [targetContainer performSelector:@selector(videoURLProvider)];
+        if ([provider respondsToSelector:@selector(videoURLForCurrentNetworkConditions)]) {
+            videoURL = [provider performSelector:@selector(videoURLForCurrentNetworkConditions)];
+        } else if ([provider respondsToSelector:@selector(videoURL)]) {
+            videoURL = [provider performSelector:@selector(videoURL)];
+        }
+    } else if ([targetContainer respondsToSelector:@selector(videoURL)]) {
+        videoURL = [targetContainer performSelector:@selector(videoURL)];
+    }
+    
+    if (videoURL) {
+        [IGTweakDownloadManager downloadVideoFromURL:videoURL];
+        return;
+    }
+    
     UIView *(^__block findImageView)(UIView *) = ^UIView *(UIView *view) {
         if ([view isKindOfClass:[UIImageView class]] && ((UIImageView *)view).image) {
-            return view;
+            // Filter out small icons
+            if (view.bounds.size.width > 50 && view.bounds.size.height > 50) return view;
         }
         for (UIView *subview in view.subviews) {
             UIView *found = findImageView(subview);
@@ -507,55 +576,68 @@ static void installAnalyticsHooks(void) {
         return nil;
     };
     
-    UIImageView *imgView = (UIImageView *)findImageView(cell);
+    UIImageView *imgView = (UIImageView *)findImageView(targetContainer);
     if (imgView && imgView.image) {
         [IGTweakDownloadManager downloadImage:imgView.image];
     } else {
-        [IGTweakDownloadManager performSelector:@selector(showErrorHUD:) withObject:@"Could not find image on screen."];
-    }
-}
-
-- (void)downloadVideoAction:(UIButton *)sender {
-    UIView *cell = sender.superview;
-    NSURL *videoURL = nil;
-    
-    if ([cell respondsToSelector:@selector(videoURLProvider)]) {
-        id provider = [cell performSelector:@selector(videoURLProvider)];
-        if ([provider respondsToSelector:@selector(videoURLForCurrentNetworkConditions)]) {
-            videoURL = [provider performSelector:@selector(videoURLForCurrentNetworkConditions)];
-        } else if ([provider respondsToSelector:@selector(videoURL)]) {
-            videoURL = [provider performSelector:@selector(videoURL)];
-        }
-    } else if ([cell respondsToSelector:@selector(videoURL)]) {
-        videoURL = [cell performSelector:@selector(videoURL)];
-    }
-    
-    if (videoURL) {
-        [IGTweakDownloadManager downloadVideoFromURL:videoURL];
-    } else {
-        [IGTweakDownloadManager performSelector:@selector(showErrorHUD:) withObject:@"Could not find video URL."];
+        [IGTweakDownloadManager performSelector:@selector(showErrorHUD:) withObject:@"Media not found!"];
     }
 }
 @end
 
-static IMP orig_photoCellLayout = NULL;
-static void hook_photoCellLayout(UIView *self, SEL _cmd) {
-    if (orig_photoCellLayout) ((void(*)(id, SEL))orig_photoCellLayout)(self, _cmd);
+static IMP orig_UFIButtonBarLayout = NULL;
+static void hook_UFIButtonBarLayout(UIView *self, SEL _cmd) {
+    if (orig_UFIButtonBarLayout) ((void(*)(id, SEL))orig_UFIButtonBarLayout)(self, _cmd);
+    if (!tweakEnabled(kIGTweakEnableDownload)) return;
+    
+    if (![self viewWithTag:999123]) {
+        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadAction:)];
+        btn.frame = CGRectMake(self.bounds.size.width - 44, 0, 44, self.bounds.size.height);
+        btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleHeight;
+        [self addSubview:btn];
+        
+        // Shift save button to the left if it exists
+        if ([self respondsToSelector:@selector(saveButton)]) {
+            UIView *saveBtn = [self performSelector:@selector(saveButton)];
+            if (saveBtn) {
+                CGRect frame = saveBtn.frame;
+                frame.origin.x -= 44;
+                saveBtn.frame = frame;
+            }
+        }
+    }
+}
+
+static IMP orig_reelsLayout = NULL;
+static void hook_reelsLayout(UIView *self, SEL _cmd) {
+    if (orig_reelsLayout) ((void(*)(id, SEL))orig_reelsLayout)(self, _cmd);
     if (!tweakEnabled(kIGTweakEnableDownload)) return;
     if (![self viewWithTag:999123]) {
-        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadPhotoAction:)];
-        btn.frame = CGRectMake(self.bounds.size.width - 60, self.bounds.size.height - 60, 44, 44);
+        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadAction:)];
+        btn.frame = CGRectMake(self.bounds.size.width - 60, self.bounds.size.height - 120, 44, 44);
         btn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin;
         [self addSubview:btn];
     }
 }
 
-static IMP orig_videoCellLayout = NULL;
-static void hook_videoCellLayout(UIView *self, SEL _cmd) {
-    if (orig_videoCellLayout) ((void(*)(id, SEL))orig_videoCellLayout)(self, _cmd);
+static IMP orig_modernReelsLayout = NULL;
+static void hook_modernReelsLayout(UIView *self, SEL _cmd) {
+    if (orig_modernReelsLayout) ((void(*)(id, SEL))orig_modernReelsLayout)(self, _cmd);
     if (!tweakEnabled(kIGTweakEnableDownload)) return;
     if (![self viewWithTag:999123]) {
-        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadVideoAction:)];
+        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadAction:)];
+        btn.frame = CGRectMake(self.bounds.size.width - 60, self.bounds.size.height - 120, 44, 44);
+        btn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin;
+        [self addSubview:btn];
+    }
+}
+
+static IMP orig_storyLayout = NULL;
+static void hook_storyLayout(UIView *self, SEL _cmd) {
+    if (orig_storyLayout) ((void(*)(id, SEL))orig_storyLayout)(self, _cmd);
+    if (!tweakEnabled(kIGTweakEnableDownload)) return;
+    if (![self viewWithTag:999123]) {
+        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadAction:)];
         btn.frame = CGRectMake(self.bounds.size.width - 60, self.bounds.size.height - 60, 44, 44);
         btn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin;
         [self addSubview:btn];
@@ -563,18 +645,15 @@ static void hook_videoCellLayout(UIView *self, SEL _cmd) {
 }
 
 static void installDownloadHooks(void) {
-    Class photoCell = NSClassFromString(@"IGFeedItemPhotoCell");
-    Class videoView = NSClassFromString(@"IGFeedItemVideoView");
+    Class ufiBar = NSClassFromString(@"IGUFIButtonBarView");
     Class reelsView = NSClassFromString(@"IGSundialVideoPlaybackView");
     Class modernReelsView = NSClassFromString(@"IGSundialModernVideoPlaybackView");
     Class storyOverlay = NSClassFromString(@"IGStoryFullscreenOverlayView");
     
-    if (photoCell) swizzleMethod(photoCell, @selector(layoutSubviews), (IMP)hook_photoCellLayout, &orig_photoCellLayout);
-    
-    if (videoView) swizzleMethod(videoView, @selector(layoutSubviews), (IMP)hook_videoCellLayout, &orig_videoCellLayout);
-    if (reelsView) swizzleMethod(reelsView, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
-    if (modernReelsView) swizzleMethod(modernReelsView, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
-    if (storyOverlay) swizzleMethod(storyOverlay, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
+    if (ufiBar) swizzleMethod(ufiBar, @selector(layoutSubviews), (IMP)hook_UFIButtonBarLayout, &orig_UFIButtonBarLayout);
+    if (reelsView) swizzleMethod(reelsView, @selector(layoutSubviews), (IMP)hook_reelsLayout, &orig_reelsLayout);
+    if (modernReelsView) swizzleMethod(modernReelsView, @selector(layoutSubviews), (IMP)hook_modernReelsLayout, &orig_modernReelsLayout);
+    if (storyOverlay) swizzleMethod(storyOverlay, @selector(layoutSubviews), (IMP)hook_storyLayout, &orig_storyLayout);
 }
 
 // ============================================================================
