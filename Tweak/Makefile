@@ -17,6 +17,7 @@ CFLAGS := \
 	-Wall
 
 SRC := IGTweak.m
+SRC := IGTweak.m IGTweakDownloadManager.m
 OUT := IGTweak.dylib
 
 .PHONY: all clean install
@@ -26,7 +27,7 @@ all: $(OUT)
 	@file $(OUT)
 
 $(OUT): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $(SRC)
 
 clean:
 	rm -f $(OUT)

@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import "IGTweakDownloadManager.h"
 
 // ============================================================================
 #pragma mark - Preferences / NSUserDefaults Keys
@@ -9,6 +10,7 @@
 #define kIGTweakGhostMode @"IGTweak_GhostMode"
 #define kIGTweakBlockTyping @"IGTweak_BlockTyping"
 #define kIGTweakBlockAnalytics @"IGTweak_BlockAnalytics"
+#define kIGTweakEnableDownload @"IGTweak_DownloadMedia"
 
 static BOOL tweakEnabled(NSString *key) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -43,7 +45,7 @@ static BOOL tweakEnabled(NSString *key) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return 4;
+    return 5;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -80,6 +82,11 @@ static BOOL tweakEnabled(NSString *key) {
             cell.detailTextLabel.text = @"Отключить сбор аналитики Facebook";
             toggle.on = tweakEnabled(kIGTweakBlockAnalytics);
             break;
+        case 4:
+            cell.textLabel.text = @"Скачивание медиа";
+            cell.detailTextLabel.text = @"Добавить кнопку загрузки фото/видео";
+            toggle.on = tweakEnabled(kIGTweakEnableDownload);
+            break;
     }
     
     return cell;
@@ -92,6 +99,7 @@ static BOOL tweakEnabled(NSString *key) {
         case 1: [defaults setBool:sender.isOn forKey:kIGTweakGhostMode]; break;
         case 2: [defaults setBool:sender.isOn forKey:kIGTweakBlockTyping]; break;
         case 3: [defaults setBool:sender.isOn forKey:kIGTweakBlockAnalytics]; break;
+        case 4: [defaults setBool:sender.isOn forKey:kIGTweakEnableDownload]; break;
     }
     [defaults synchronize];
 }
@@ -443,6 +451,125 @@ static void hook_makeKeyAndVisible(UIWindow *self, SEL _cmd) {
     }
 }
 
+static IMP orig_logEvent = NULL;
+static void hook_logEvent(id self, SEL _cmd, id event) {
+    if (tweakEnabled(kIGTweakBlockAnalytics)) {
+        return; // Block event
+    }
+    if (orig_logEvent) {
+        ((void(*)(id, SEL, id))orig_logEvent)(self, _cmd, event);
+    }
+}
+
+static void installAnalyticsHooks(void) {
+    Class loggerClass = NSClassFromString(@"IGAnalyticsLogger");
+    if (loggerClass) {
+        swizzleMethod(loggerClass, @selector(logEvent:), (IMP)hook_logEvent, &orig_logEvent);
+    }
+}
+
+// ============================================================================
+#pragma mark - Download Media Feature
+// ============================================================================
+
+@interface IGTweakDownloadHelper : NSObject
++ (instancetype)sharedInstance;
+- (void)downloadPhotoAction:(UIButton *)sender;
+- (void)downloadVideoAction:(UIButton *)sender;
+@end
+
+@implementation IGTweakDownloadHelper
++ (instancetype)sharedInstance {
+    static IGTweakDownloadHelper *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ instance = [[self alloc] init]; });
+    return instance;
+}
+
+- (void)downloadPhotoAction:(UIButton *)sender {
+    UIView *cell = sender.superview;
+    // Recursively find UIImageView
+    UIView *(^__block findImageView)(UIView *) = ^UIView *(UIView *view) {
+        if ([view isKindOfClass:[UIImageView class]] && ((UIImageView *)view).image) {
+            return view;
+        }
+        for (UIView *subview in view.subviews) {
+            UIView *found = findImageView(subview);
+            if (found) return found;
+        }
+        return nil;
+    };
+    
+    UIImageView *imgView = (UIImageView *)findImageView(cell);
+    if (imgView && imgView.image) {
+        [IGTweakDownloadManager downloadImage:imgView.image];
+    } else {
+        [IGTweakDownloadManager performSelector:@selector(showErrorHUD:) withObject:@"Could not find image on screen."];
+    }
+}
+
+- (void)downloadVideoAction:(UIButton *)sender {
+    UIView *cell = sender.superview;
+    NSURL *videoURL = nil;
+    
+    if ([cell respondsToSelector:@selector(videoURLProvider)]) {
+        id provider = [cell performSelector:@selector(videoURLProvider)];
+        if ([provider respondsToSelector:@selector(videoURLForCurrentNetworkConditions)]) {
+            videoURL = [provider performSelector:@selector(videoURLForCurrentNetworkConditions)];
+        } else if ([provider respondsToSelector:@selector(videoURL)]) {
+            videoURL = [provider performSelector:@selector(videoURL)];
+        }
+    } else if ([cell respondsToSelector:@selector(videoURL)]) {
+        videoURL = [cell performSelector:@selector(videoURL)];
+    }
+    
+    if (videoURL) {
+        [IGTweakDownloadManager downloadVideoFromURL:videoURL];
+    } else {
+        [IGTweakDownloadManager performSelector:@selector(showErrorHUD:) withObject:@"Could not find video URL."];
+    }
+}
+@end
+
+static IMP orig_photoCellLayout = NULL;
+static void hook_photoCellLayout(UIView *self, SEL _cmd) {
+    if (orig_photoCellLayout) ((void(*)(id, SEL))orig_photoCellLayout)(self, _cmd);
+    if (!tweakEnabled(kIGTweakEnableDownload)) return;
+    if (![self viewWithTag:999123]) {
+        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadPhotoAction:)];
+        btn.frame = CGRectMake(self.bounds.size.width - 60, self.bounds.size.height - 60, 44, 44);
+        btn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin;
+        [self addSubview:btn];
+    }
+}
+
+static IMP orig_videoCellLayout = NULL;
+static void hook_videoCellLayout(UIView *self, SEL _cmd) {
+    if (orig_videoCellLayout) ((void(*)(id, SEL))orig_videoCellLayout)(self, _cmd);
+    if (!tweakEnabled(kIGTweakEnableDownload)) return;
+    if (![self viewWithTag:999123]) {
+        UIButton *btn = [IGTweakDownloadManager createDownloadButtonWithTarget:[IGTweakDownloadHelper sharedInstance] action:@selector(downloadVideoAction:)];
+        btn.frame = CGRectMake(self.bounds.size.width - 60, self.bounds.size.height - 60, 44, 44);
+        btn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin;
+        [self addSubview:btn];
+    }
+}
+
+static void installDownloadHooks(void) {
+    Class photoCell = NSClassFromString(@"IGFeedItemPhotoCell");
+    Class videoView = NSClassFromString(@"IGFeedItemVideoView");
+    Class reelsView = NSClassFromString(@"IGSundialVideoPlaybackView");
+    Class modernReelsView = NSClassFromString(@"IGSundialModernVideoPlaybackView");
+    Class storyOverlay = NSClassFromString(@"IGStoryFullscreenOverlayView");
+    
+    if (photoCell) swizzleMethod(photoCell, @selector(layoutSubviews), (IMP)hook_photoCellLayout, &orig_photoCellLayout);
+    
+    if (videoView) swizzleMethod(videoView, @selector(layoutSubviews), (IMP)hook_videoCellLayout, &orig_videoCellLayout);
+    if (reelsView) swizzleMethod(reelsView, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
+    if (modernReelsView) swizzleMethod(modernReelsView, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
+    if (storyOverlay) swizzleMethod(storyOverlay, @selector(layoutSubviews), (IMP)hook_videoCellLayout, NULL);
+}
+
 static void installWindowHooks(void) {
     swizzleMethod([UIWindow class], @selector(makeKeyAndVisible), (IMP)hook_makeKeyAndVisible, &orig_makeKeyAndVisible);
 }
@@ -461,6 +588,8 @@ static void IGTweakInit(void) {
         installTypingIndicatorHooks();
         installScreenshotHooks();
         installTrackingHooks();
+        installAnalyticsHooks();
+        installDownloadHooks();
         installWindowHooks();
         NSLog(@"[IGTweak] ✅ All hooks and UI installed successfully!");
     }
