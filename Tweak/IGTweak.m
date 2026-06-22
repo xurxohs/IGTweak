@@ -177,6 +177,17 @@ static BOOL hook_isFetchingAds(id self, SEL _cmd) {
     return NO;
 }
 
+static IMP orig_surfaceSupportsAdFeed = NULL;
+static BOOL hook_surfaceSupportsAdFeed(id self, SEL _cmd) {
+    if (tweakEnabled(kIGTweakBlockAds)) {
+        return NO;
+    }
+    if (orig_surfaceSupportsAdFeed) {
+        return ((BOOL(*)(id, SEL))orig_surfaceSupportsAdFeed)(self, _cmd);
+    }
+    return YES;
+}
+
 static IMP orig_deleteSponsoredItem = NULL;
 static BOOL hook_deleteSponsoredItem(id self, SEL _cmd, id item) {
     if (orig_deleteSponsoredItem) {
@@ -188,9 +199,16 @@ static BOOL hook_deleteSponsoredItem(id self, SEL _cmd, id item) {
 static void installFeedAdHooks(void) {
     Class adInsertionHandler = NSClassFromString(@"IGAdInsertionHandler");
     Class adFetcherManager = NSClassFromString(@"IGAdFetcherManager");
+    Class mainFeedViewModel = NSClassFromString(@"IGMainFeedViewModel");
 
     swizzleMethod(adInsertionHandler, @selector(receivedSponsoredItems:intentAwareData:), (IMP)hook_receivedSponsoredItems, &orig_receivedSponsoredItems);
     swizzleMethod(adInsertionHandler, @selector(adInsertionHandler:shouldTryToInsertSponsoredItem:atInsertionIndex:focusedIndex:validationResultString:insertionContext:), (IMP)hook_shouldTryToInsert, &orig_shouldTryToInsert);
+    swizzleMethod(adInsertionHandler, @selector(surfaceSupportsAd), (IMP)hook_surfaceSupportsAdFeed, &orig_surfaceSupportsAdFeed);
+    
+    if (mainFeedViewModel) {
+        swizzleMethod(mainFeedViewModel, @selector(surfaceSupportsAd), (IMP)hook_surfaceSupportsAdFeed, NULL);
+    }
+    
     swizzleMethod(adFetcherManager, @selector(isFetchingAds), (IMP)hook_isFetchingAds, &orig_isFetchingAds);
 }
 
@@ -240,6 +258,17 @@ static BOOL hook_surfaceSupportsAd(id self, SEL _cmd) {
     return YES;
 }
 
+static IMP orig_isSponsored = NULL;
+static BOOL hook_isSponsored(id self, SEL _cmd) {
+    if (tweakEnabled(kIGTweakBlockAds)) {
+        return NO;
+    }
+    if (orig_isSponsored) {
+        return ((BOOL(*)(id, SEL))orig_isSponsored)(self, _cmd);
+    }
+    return NO;
+}
+
 static void installStoryAdHooks(void) {
     Class storyAdDataSource = NSClassFromString(@"IGStoryAdInsertionDataSource");
 
@@ -247,6 +276,19 @@ static void installStoryAdHooks(void) {
     swizzleMethod(storyAdDataSource, @selector(adInsertionHandler:shouldTryToInsertSponsoredItem:atInsertionIndex:focusedIndex:validationResultString:insertionContext:), (IMP)hook_storyShouldTryToInsert, &orig_storyShouldTryToInsert);
     swizzleMethod(storyAdDataSource, @selector(allSponsoredItems), (IMP)hook_storyAllSponsoredItems, &orig_storyAllSponsoredItems);
     swizzleMethod(storyAdDataSource, @selector(surfaceSupportsAd), (IMP)hook_surfaceSupportsAd, &orig_surfaceSupportsAd);
+    
+    // Aggressive isSponsored hooks
+    Class storyClass = NSClassFromString(@"IGStory");
+    Class feedItemPhoto = NSClassFromString(@"IGFeedItemPhotoCellConfiguration");
+    Class modernFeedVideo = NSClassFromString(@"IGModernFeedVideoCellConfiguration");
+    Class storyOverlay = NSClassFromString(@"IGStoryFullscreenOverlayView");
+    Class sundialInsertion = NSClassFromString(@"IGSundialFeedInsertionHandler");
+    
+    if (storyClass) swizzleMethod(storyClass, @selector(isSponsored), (IMP)hook_isSponsored, &orig_isSponsored);
+    if (feedItemPhoto) swizzleMethod(feedItemPhoto, @selector(isSponsored), (IMP)hook_isSponsored, NULL);
+    if (modernFeedVideo) swizzleMethod(modernFeedVideo, @selector(isSponsored), (IMP)hook_isSponsored, NULL);
+    if (storyOverlay) swizzleMethod(storyOverlay, @selector(isSponsored), (IMP)hook_isSponsored, NULL);
+    if (sundialInsertion) swizzleMethod(sundialInsertion, @selector(surfaceSupportsAd), (IMP)hook_surfaceSupportsAd, NULL);
 }
 
 // ============================================================================
