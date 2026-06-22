@@ -14,6 +14,7 @@ CFLAGS := \
 	-framework UIKit \
 	-framework Security \
 	-lobjc \
+	-DFISHHOOK_EXPORT \
 	-O2 \
 	-Wall
 

@@ -715,55 +715,87 @@ static void installWindowHooks(void) {
 // ============================================================================
 #pragma mark - Keychain Fix (Sideloading)
 // ============================================================================
+// Instagram stores login tokens in iOS Keychain with a hardcoded
+// kSecAttrAccessGroup tied to Facebook's Team ID (377CTTN4N4).
+// When re-signed with a different certificate, iOS denies access to those
+// items. We intercept all four SecItem* C functions via fishhook and strip
+// the access-group key so the default (app-scoped) group is used instead.
 
 static OSStatus (*orig_SecItemAdd)(CFDictionaryRef attributes, CFTypeRef *result);
 static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    if (attributes) {
-        NSMutableDictionary *mutableAttributes = [(__bridge NSDictionary *)attributes mutableCopy];
-        [mutableAttributes removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
-        return orig_SecItemAdd((__bridge CFDictionaryRef)mutableAttributes, result);
+    NSMutableDictionary *mut = [(__bridge NSDictionary *)attributes mutableCopy];
+    NSString *group = mut[(__bridge id)kSecAttrAccessGroup];
+    if (group) {
+        NSLog(@"[IGTweak] 🔑 SecItemAdd: stripped access group '%@'", group);
+        [mut removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
     }
-    return orig_SecItemAdd(attributes, result);
-}
-
-static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
-static OSStatus hook_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
-    if (query) {
-        NSMutableDictionary *mutableQuery = [(__bridge NSDictionary *)query mutableCopy];
-        [mutableQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
-        return orig_SecItemUpdate((__bridge CFDictionaryRef)mutableQuery, attributesToUpdate);
+    // Also strip kSecAttrSynchronizable to avoid iCloud Keychain cross-device issues
+    [mut removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
+    OSStatus status = orig_SecItemAdd((__bridge CFDictionaryRef)mut, result);
+    if (status != errSecSuccess) {
+        NSLog(@"[IGTweak] 🔑 SecItemAdd returned %d", (int)status);
     }
-    return orig_SecItemUpdate(query, attributesToUpdate);
-}
-
-static OSStatus (*orig_SecItemDelete)(CFDictionaryRef query);
-static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
-    if (query) {
-        NSMutableDictionary *mutableQuery = [(__bridge NSDictionary *)query mutableCopy];
-        [mutableQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
-        return orig_SecItemDelete((__bridge CFDictionaryRef)mutableQuery);
-    }
-    return orig_SecItemDelete(query);
+    return status;
 }
 
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    if (query) {
-        NSMutableDictionary *mutableQuery = [(__bridge NSDictionary *)query mutableCopy];
-        [mutableQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
-        return orig_SecItemCopyMatching((__bridge CFDictionaryRef)mutableQuery, result);
+    NSMutableDictionary *mut = [(__bridge NSDictionary *)query mutableCopy];
+    NSString *group = mut[(__bridge id)kSecAttrAccessGroup];
+    if (group) {
+        NSLog(@"[IGTweak] 🔑 SecItemCopyMatching: stripped access group '%@'", group);
+        [mut removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
     }
-    return orig_SecItemCopyMatching(query, result);
+    [mut removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
+    OSStatus status = orig_SecItemCopyMatching((__bridge CFDictionaryRef)mut, result);
+    if (status != errSecSuccess && status != errSecItemNotFound) {
+        NSLog(@"[IGTweak] 🔑 SecItemCopyMatching returned %d", (int)status);
+    }
+    return status;
+}
+
+static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate);
+static OSStatus hook_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    NSMutableDictionary *mutQ = [(__bridge NSDictionary *)query mutableCopy];
+    NSString *group = mutQ[(__bridge id)kSecAttrAccessGroup];
+    if (group) {
+        NSLog(@"[IGTweak] 🔑 SecItemUpdate: stripped access group '%@'", group);
+        [mutQ removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    }
+    [mutQ removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
+    // Also clean the attributes dict
+    NSMutableDictionary *mutA = [(__bridge NSDictionary *)attributesToUpdate mutableCopy];
+    [mutA removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    [mutA removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
+    return orig_SecItemUpdate((__bridge CFDictionaryRef)mutQ, (__bridge CFDictionaryRef)mutA);
+}
+
+static OSStatus (*orig_SecItemDelete)(CFDictionaryRef query);
+static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
+    NSMutableDictionary *mut = [(__bridge NSDictionary *)query mutableCopy];
+    NSString *group = mut[(__bridge id)kSecAttrAccessGroup];
+    if (group) {
+        NSLog(@"[IGTweak] 🔑 SecItemDelete: stripped access group '%@'", group);
+        [mut removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    }
+    [mut removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
+    return orig_SecItemDelete((__bridge CFDictionaryRef)mut);
 }
 
 static void installKeychainHooks(void) {
-    rebind_symbols((struct rebinding[4]){
-        {"SecItemAdd", hook_SecItemAdd, (void *)&orig_SecItemAdd},
-        {"SecItemUpdate", hook_SecItemUpdate, (void *)&orig_SecItemUpdate},
-        {"SecItemDelete", hook_SecItemDelete, (void *)&orig_SecItemDelete},
-        {"SecItemCopyMatching", hook_SecItemCopyMatching, (void *)&orig_SecItemCopyMatching}
-    }, 4);
-    NSLog(@"[IGTweak] 🔑 Keychain Fix Installed!");
+    struct rebinding rebindings[] = {
+        {"SecItemAdd",          (void *)hook_SecItemAdd,          (void **)&orig_SecItemAdd},
+        {"SecItemCopyMatching", (void *)hook_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching},
+        {"SecItemUpdate",       (void *)hook_SecItemUpdate,       (void **)&orig_SecItemUpdate},
+        {"SecItemDelete",       (void *)hook_SecItemDelete,       (void **)&orig_SecItemDelete},
+    };
+    int result = rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+    if (result == 0) {
+        NSLog(@"[IGTweak] 🔑 Keychain hooks installed successfully (orig_SecItemAdd=%p, orig_SecItemCopyMatching=%p)",
+              orig_SecItemAdd, orig_SecItemCopyMatching);
+    } else {
+        NSLog(@"[IGTweak] ❌ Failed to install keychain hooks! rebind_symbols returned %d", result);
+    }
 }
 
 // ============================================================================
@@ -774,6 +806,7 @@ __attribute__((constructor))
 static void IGTweakInit(void) {
     NSLog(@"[IGTweak] 🚀 IGTweak loading with UI...");
     @autoreleasepool {
+        // Keychain fix MUST be first, before Instagram touches any SecItem calls
         installKeychainHooks();
         installFeedAdHooks();
         installStoryAdHooks();
@@ -788,3 +821,4 @@ static void IGTweakInit(void) {
         NSLog(@"[IGTweak] ✅ All hooks and UI installed successfully!");
     }
 }
+
